@@ -1,17 +1,19 @@
 package ink.ptms.adyeshach.impl.nms
 
 import com.mojang.datafixers.util.Pair
-import taboolib.module.nms.createDataSerializer
 import ink.ptms.adyeshach.core.*
 import ink.ptms.adyeshach.core.bukkit.BukkitAnimation
-import ink.ptms.adyeshach.core.util.fixYaw
 import ink.ptms.adyeshach.core.util.ifloor
+import ink.ptms.adyeshach.impl.nms.specific.NMS21
+import ink.ptms.adyeshach.impl.nms.specific.NMS21p
 import org.bukkit.Location
 import org.bukkit.entity.Player
 import org.bukkit.inventory.EquipmentSlot
 import org.bukkit.inventory.ItemStack
 import org.bukkit.util.Vector
+import taboolib.library.reflex.Reflex.Companion.invokeConstructor
 import taboolib.module.nms.MinecraftVersion
+import taboolib.module.nms.createDataSerializer
 
 /**
  * Adyeshach
@@ -37,8 +39,10 @@ class DefaultMinecraftEntityOperator : MinecraftEntityOperator {
     }
 
     override fun teleportEntity(player: List<Player>, entityId: Int, location: Location, onGround: Boolean) {
+        // 修复视角
+        val yf = Adyeshach.api().getEntityFinder().getEntityFromClientEntityId(entityId, player.firstOrNull() ?: return)?.entityType.fixYaw(location.yaw)
         // 计算视角
-        val yaw = (location.yaw * 256 / 360).toInt().toByte()
+        val yaw = (yf * 256 / 360).toInt().toByte()
         val pitch = (location.pitch * 256 / 360).toInt().toByte()
         // 版本判断
         val packet: Any = when (major) {
@@ -66,8 +70,22 @@ class DefaultMinecraftEntityOperator : MinecraftEntityOperator {
                 writeByte(pitch)
                 writeBoolean(onGround)
             }.build() as NMSPacketDataSerializer)
-            // 1.21
-            13 -> error("还不支持")
+            // 1.21 1.21.8
+            13 -> {
+                if (MinecraftVersion.versionId == 12101) {
+                    NMSPacketPlayOutEntityTeleport::class.java.invokeConstructor(createDataSerializer {
+                        writeVarInt(entityId)
+                        writeDouble(location.x)
+                        writeDouble(location.y)
+                        writeDouble(location.z)
+                        writeByte(yaw)
+                        writeByte(pitch)
+                        writeBoolean(onGround)
+                    }.build() as NMSPacketDataSerializer)
+                } else {
+                    NMS21.instance.createTeleport(entityId, location, yaw, pitch, onGround)
+                }
+            }
             // 不支持
             else -> error("Unsupported version.")
         }
@@ -78,8 +96,10 @@ class DefaultMinecraftEntityOperator : MinecraftEntityOperator {
     }
 
     override fun updateEntityLook(player: List<Player>, entityId: Int, yaw: Float, pitch: Float, onGround: Boolean) {
+        // 修复视角
+        val yf = Adyeshach.api().getEntityFinder().getEntityFromClientEntityId(entityId, player.firstOrNull() ?: return)?.entityType.fixYaw(yaw)
         // 计算视角
-        val y = (yaw * 256 / 360).toInt().toByte()
+        val y = (yf * 256 / 360).toInt().toByte()
         val p = (pitch * 256 / 360).toInt().toByte()
         if (majorLegacy >= 11400) {
             packetHandler.sendPacket(player, NMSPacketPlayOutEntityLook(entityId, y, p, onGround))
@@ -107,8 +127,10 @@ class DefaultMinecraftEntityOperator : MinecraftEntityOperator {
         pitch: Float,
         onGround: Boolean,
     ) {
+        // 修复视角
+        val yf = Adyeshach.api().getEntityFinder().getEntityFromClientEntityId(entityId, player.firstOrNull() ?: return)?.entityType.fixYaw(yaw)
         // 计算视角
-        val yRot = (yaw * 256 / 360).toInt().toByte()
+        val yRot = (yf * 256 / 360).toInt().toByte()
         val xRot = (pitch * 256 / 360).toInt().toByte()
         // 版本判断
         if (majorLegacy >= 11400) {
@@ -128,16 +150,22 @@ class DefaultMinecraftEntityOperator : MinecraftEntityOperator {
     }
 
     override fun updateHeadRotation(player: List<Player>, entityId: Int, yaw: Float) {
-        if (isUniversal) {
+        // 修复视角
+        val yf = Adyeshach.api().getEntityFinder().getEntityFromClientEntityId(entityId, player.firstOrNull() ?: return)?.entityType.fixYaw(yaw)
+        if (MinecraftVersion.versionId >= 12107) {
+            packetHandler.sendPacket(player, NMS21p.instance.createEntityHead(entityId, ifloor(yf * 256.0 / 360.0).toByte()))
+        } else if (MinecraftVersion.versionId >= 12101) {
+            packetHandler.sendPacket(player, NMS21.instance.createEntityHead(entityId, ifloor(yf * 256.0 / 360.0).toByte()))
+        } else if (isUniversal) {
             packetHandler.sendPacket(player, NMSPacketPlayOutEntityHeadRotation(createDataSerializer {
                 writeVarInt(entityId)
-                writeByte(ifloor(yaw * 256.0 / 360.0).toByte())
+                writeByte(ifloor(yf * 256.0 / 360.0).toByte())
             }.build() as NMSPacketDataSerializer))
         } else {
             packetHandler.sendPacket(player, NMS16PacketPlayOutEntityHeadRotation().also {
                 it.a(createDataSerializer {
                     writeVarInt(entityId)
-                    writeByte(ifloor(yaw * 256.0 / 360.0).toByte())
+                    writeByte(ifloor(yf * 256.0 / 360.0).toByte())
                 }.build() as NMS16PacketDataSerializer)
             })
         }
@@ -149,6 +177,9 @@ class DefaultMinecraftEntityOperator : MinecraftEntityOperator {
 
     override fun updateEquipment(player: List<Player>, entityId: Int, equipment: Map<EquipmentSlot, ItemStack>) {
         when {
+            majorLegacy >= 12100 -> {
+                packetHandler.sendPacket(player, NMS21.instance.createEntityEquipment(entityId, equipment))
+            }
             // 从 1.16 开始每个包支持多个物品
             majorLegacy >= 11600 -> {
                 val items = equipment.map { Pair(it.key.toNMSEnumItemSlot(), CraftItemStack19.asNMSCopy(it.value)) }
@@ -164,20 +195,34 @@ class DefaultMinecraftEntityOperator : MinecraftEntityOperator {
     }
 
     override fun updatePassengers(player: List<Player>, entityId: Int, vararg passengers: Int) {
-        if (isUniversal) {
-            packetHandler.sendPacket(player, NMSPacketPlayOutMount(createDataSerializer {
-                writeVarInt(entityId)
-                writeVarIntArray(passengers)
-            }.build() as NMSPacketDataSerializer))
-        } else {
-            packetHandler.sendPacket(player, NMS16PacketPlayOutMount().also {
-                it.a(createDataSerializer {
+        when {
+            // R5 及以上
+            MinecraftVersion.versionId >= 12107 -> {
+                packetHandler.sendPacket(player, NMS21p.instance.createPassengers(entityId, *passengers))
+            }
+            // R2 ~ R4
+            MinecraftVersion.versionId >= 12101 -> {
+                packetHandler.sendPacket(player, NMS21.instance.createPassengers(entityId, *passengers))
+            }
+            // Universal 兼容
+            isUniversal -> {
+                packetHandler.sendPacket(player, NMSPacketPlayOutMount(createDataSerializer {
                     writeVarInt(entityId)
                     writeVarIntArray(passengers)
-                }.build() as NMS16PacketDataSerializer)
-            })
+                }.build() as NMSPacketDataSerializer))
+            }
+            // 老版本
+            else -> {
+                packetHandler.sendPacket(player, NMS16PacketPlayOutMount().also {
+                    it.a(createDataSerializer {
+                        writeVarInt(entityId)
+                        writeVarIntArray(passengers)
+                    }.build() as NMS16PacketDataSerializer)
+                })
+            }
         }
     }
+
 
     override fun updateEntityMetadata(player: List<Player>, entityId: Int, metadata: List<MinecraftMeta>) {
         return packetHandler.sendPacket(player, metaHandler.createMetadataPacket(entityId, metadata))
